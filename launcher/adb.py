@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -139,6 +140,29 @@ def install(apk: Path, device: str | None = None) -> None:
         )
 
 
+
+def apk_native_abis(apk: Path) -> list[str]:
+    """Return native ABIs present in the APK, if any."""
+    try:
+        with zipfile.ZipFile(apk) as archive:
+            abis = {
+                name.split("/")[1]
+                for name in archive.namelist()
+                if name.startswith("lib/") and name.count("/") >= 2
+            }
+        return sorted(abis)
+    except (OSError, zipfile.BadZipFile):
+        return []
+
+
+def crash_log(device: str, lines: int = 250) -> str:
+    result = run_adb(
+        "-s", device, "logcat", "-d", "-t", str(lines), "-v", "brief",
+        timeout=30,
+    )
+    return (result.stdout or result.stderr).strip()
+
+
 def package_name_from_apk(apk: Path) -> str:
     sdk_roots = [
         Path(os.environ.get("ANDROID_HOME", "")),
@@ -251,6 +275,23 @@ def launch(apk: Path, device: str | None = None) -> str:
         raise AdbError(
             f"Android reported an error while starting Minecraft ({activity}).\n\n"
             + output
+        )
+
+    # A successful am start only proves that Android accepted the activity.
+    # Give the app a moment to initialize, then detect immediate native/app
+    # crashes so the launcher can show useful diagnostics instead of claiming
+    # that Minecraft launched successfully.
+    time.sleep(8)
+    pid = run_adb(
+        *target, "shell", "pidof", package, timeout=15
+    )
+    if pid.returncode != 0 or not pid.stdout.strip():
+        log = crash_log(device or "", 250) if device else ""
+        details = log[-12000:] if log else "No Android logcat output was available."
+        raise AdbError(
+            f"Minecraft ({package}) stopped immediately after launch.\n\n"
+            f"Launcher output:\n{output or 'none'}\n\n"
+            f"Recent Android logcat:\n{details}"
         )
 
     return package
