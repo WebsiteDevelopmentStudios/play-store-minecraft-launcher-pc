@@ -49,9 +49,6 @@ def _run(
 ) -> subprocess.CompletedProcess[str]:
     try:
         if os.name == "nt" and command and command[0].lower().endswith(".bat"):
-            # Windows does not execute .bat files directly in all subprocess
-            # configurations. Running through cmd.exe also makes sdkmanager's
-            # Java environment and exit code behave consistently.
             command = ["cmd.exe", "/d", "/s", "/c", *command]
 
         return subprocess.run(
@@ -79,7 +76,6 @@ def _download(url: str, destination: Path, progress: Progress) -> None:
         with urllib.request.urlopen(url, timeout=60) as response:
             total = int(response.headers.get("Content-Length", "0"))
             downloaded = 0
-
             with partial.open("wb") as handle:
                 while True:
                     chunk = response.read(1024 * 1024)
@@ -92,7 +88,6 @@ def _download(url: str, destination: Path, progress: Progress) -> None:
                             f"Downloading Android runtime tools... "
                             f"{downloaded * 100 // total}%"
                         )
-
         partial.replace(destination)
     except Exception as exc:
         partial.unlink(missing_ok=True)
@@ -153,13 +148,25 @@ def _sdk_environment() -> dict[str, str]:
 
 
 def _ensure_java(progress: Progress) -> Path:
-    existing = os.environ.get("JAVA_HOME")
-    if existing and (Path(existing) / "bin" / "java.exe").is_file():
-        return Path(existing)
+    # A broken JAVA_HOME can prevent even a valid java.exe on PATH from
+    # starting. Only use JAVA_HOME when it actually contains java.exe.
+    existing = os.environ.get("JAVA_HOME", "").strip().strip('"')
+    if existing:
+        existing_path = Path(existing)
+        if (existing_path / "bin" / "java.exe").is_file():
+            return existing_path
 
-    java = shutil.which("java")
+    # Ignore an invalid inherited JAVA_HOME while locating Java on PATH.
+    clean_env = os.environ.copy()
+    clean_env.pop("JAVA_HOME", None)
+
+    java = shutil.which("java", path=clean_env.get("PATH"))
     if java:
-        return Path(java).resolve().parent.parent
+        java_path = Path(java).resolve()
+        if java_path.name.lower() == "java.exe":
+            java_home = java_path.parent.parent
+            if (java_home / "bin" / "java.exe").is_file():
+                return java_home
 
     java_dir = RUNTIME_DIR / "jdk-17"
     java_exe = java_dir / "bin" / "java.exe"
@@ -207,9 +214,6 @@ def _tool_env(java_home: Path) -> dict[str, str]:
 
 def _accept_licenses(env: dict[str, str], progress: Progress) -> None:
     progress("Checking Android SDK licenses...")
-
-    # sdkmanager is interactive on Windows. Send more responses than the
-    # current package set can require and keep the full output for diagnostics.
     result = _run(
         [str(SDKMANAGER), "--licenses"],
         timeout=180,
@@ -226,20 +230,14 @@ def _accept_licenses(env: dict[str, str], progress: Progress) -> None:
             + (output or "sdkmanager returned a non-zero exit code.")
         )
 
-    # Some sdkmanager builds can finish with code 0 while still reporting that
-    # a license remains unaccepted. Treat that as a setup failure instead of
-    # allowing the package install to fail later with a less useful message.
     if "not accepted" in output.lower():
         raise RuntimeErrorBase(
             "Android SDK license setup failed.\n\n" + output
         )
 
 
-def _install_sdk_packages(
-    env: dict[str, str], progress: Progress
-) -> None:
+def _install_sdk_packages(env: dict[str, str], progress: Progress) -> None:
     progress("Installing Android emulator components...")
-
     result = _run(
         [str(SDKMANAGER), *SDK_PACKAGES],
         timeout=1800,
