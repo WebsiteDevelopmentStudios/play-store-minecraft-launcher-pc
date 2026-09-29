@@ -51,6 +51,9 @@ def _run(
     input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     try:
+        if os.name == "nt" and command and command[0].lower().endswith(".bat"):
+            command = ["cmd.exe", "/d", "/c", *command]
+
         return subprocess.run(
             command,
             input=input_text,
