@@ -4,7 +4,6 @@ import os
 import shutil
 import subprocess
 import time
-import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -100,9 +99,6 @@ def _download(url: str, destination: Path, progress: Progress) -> None:
         last_error = str(exc)
         partial.unlink(missing_ok=True)
 
-    # Windows includes curl.exe on supported Windows 10/11 installations.
-    # Use it as a fallback for machines where Python's TLS/certificate store
-    # cannot establish a connection to Google's download host.
     if os.name == "nt" and shutil.which("curl.exe"):
         progress("Retrying Android runtime download with Windows curl...")
         result = subprocess.run(
@@ -352,6 +348,61 @@ def _create_avd(env: dict[str, str], progress: Progress) -> None:
         )
 
 
+def _configure_gaming_avd(progress: Progress) -> None:
+    config = RUNTIME_DIR / "avd" / f"{AVD_NAME}.avd" / "config.ini"
+    if not config.is_file():
+        return
+
+    try:
+        lines = config.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise RuntimeErrorBase("Could not read the Android device configuration.") from exc
+
+    cpu_count = os.cpu_count() or 4
+    # Keep some CPU available for Windows and Minecraft's launcher/UI.
+    cores = max(4, min(8, cpu_count - 2))
+    ram_mb = 6144 if (os.cpu_count() or 4) >= 8 else 4096
+
+    overrides = {
+        "hw.cpu.ncore": str(cores),
+        "hw.ramSize": str(ram_mb),
+        "vm.heapSize": "512",
+        "hw.gpu.enabled": "yes",
+        "hw.gpu.mode": "host",
+        "hw.lcd.refreshRate": "120",
+        "hw.lcd.density": "420",
+        "hw.audioInput": "yes",
+        "hw.audioOutput": "yes",
+        "fastboot.forceColdBoot": "no",
+    }
+
+    updated: list[str] = []
+    seen: set[str] = set()
+
+    for line in lines:
+        if "=" in line:
+            key = line.split("=", 1)[0].strip()
+            if key in overrides:
+                updated.append(f"{key}={overrides[key]}")
+                seen.add(key)
+                continue
+        updated.append(line)
+
+    for key, value in overrides.items():
+        if key not in seen:
+            updated.append(f"{key}={value}")
+
+    try:
+        config.write_text("\n".join(updated) + "\n", encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeErrorBase("Could not save Android gaming configuration.") from exc
+
+    progress(
+        f"Gaming mode enabled: {cores} CPU cores, {ram_mb} MB RAM, "
+        "hardware GPU, 120 Hz target."
+    )
+
+
 def prepare(progress: Progress | None = None) -> None:
     progress = progress or (lambda _message: None)
 
@@ -368,6 +419,7 @@ def prepare(progress: Progress | None = None) -> None:
     _accept_licenses(env, progress)
     _install_sdk_packages(env, progress)
     _create_avd(env, progress)
+    _configure_gaming_avd(progress)
 
     if not EMULATOR.is_file():
         raise RuntimeErrorBase(
@@ -386,22 +438,33 @@ def start(progress: Progress | None = None) -> subprocess.Popen[str]:
 
     if not is_ready():
         prepare(progress)
+    else:
+        _configure_gaming_avd(progress)
 
     avd_home = RUNTIME_DIR / "avd"
     avd_home.mkdir(parents=True, exist_ok=True)
     env = _sdk_environment()
     env["ANDROID_AVD_HOME"] = str(avd_home)
 
-    progress("Starting Android...")
+    progress("Starting Android in gaming mode...")
     return subprocess.Popen(
         [
             str(EMULATOR),
             "-avd",
             AVD_NAME,
-            "-no-snapshot",
-            "-no-boot-anim",
             "-gpu",
-            "swiftshader_indirect",
+            "host",
+            "-accel",
+            "auto",
+            "-cores",
+            str(max(4, min(8, (os.cpu_count() or 4) - 2))),
+            "-memory",
+            "6144" if (os.cpu_count() or 4) >= 8 else "4096",
+            "-no-boot-anim",
+            "-camera-back",
+            "none",
+            "-camera-front",
+            "none",
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
