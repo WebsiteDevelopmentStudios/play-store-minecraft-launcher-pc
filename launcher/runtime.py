@@ -23,14 +23,11 @@ AVDMANAGER = CMDLINE_DIR / "bin" / "avdmanager.bat"
 EMULATOR = SDK_DIR / "emulator" / "emulator.exe"
 AVD_NAME = "BlemmBedrock"
 
-# Official Google Android command-line tools archive.
 COMMAND_LINE_TOOLS_URL = (
     "https://dl.google.com/android/repository/"
     "commandlinetools-win-11076708_latest.zip"
 )
 
-# The Play Store image provides Google Play services for normal Android app
-# authentication flows. The user's Minecraft APK is still supplied separately.
 SYSTEM_IMAGE = "system-images;android-35;google_apis_playstore;x86_64"
 SDK_PACKAGES = [
     "platform-tools",
@@ -52,7 +49,10 @@ def _run(
 ) -> subprocess.CompletedProcess[str]:
     try:
         if os.name == "nt" and command and command[0].lower().endswith(".bat"):
-            command = ["cmd.exe", "/d", "/c", *command]
+            # Windows does not execute .bat files directly in all subprocess
+            # configurations. Running through cmd.exe also makes sdkmanager's
+            # Java environment and exit code behave consistently.
+            command = ["cmd.exe", "/d", "/s", "/c", *command]
 
         return subprocess.run(
             command,
@@ -85,18 +85,15 @@ def _download(url: str, destination: Path, progress: Progress) -> None:
                     chunk = response.read(1024 * 1024)
                     if not chunk:
                         break
-
                     handle.write(chunk)
                     downloaded += len(chunk)
-
                     if total:
-                        percent = downloaded * 100 // total
                         progress(
-                            f"Downloading Android runtime tools... {percent}%"
+                            f"Downloading Android runtime tools... "
+                            f"{downloaded * 100 // total}%"
                         )
 
         partial.replace(destination)
-
     except Exception as exc:
         partial.unlink(missing_ok=True)
         raise RuntimeErrorBase(
@@ -111,13 +108,11 @@ def _install_command_line_tools(progress: Progress) -> None:
 
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     archive = RUNTIME_DIR / "commandlinetools-windows.zip"
-
     _download(COMMAND_LINE_TOOLS_URL, archive, progress)
 
     temp_root = RUNTIME_DIR / "cmdline-extract"
     shutil.rmtree(temp_root, ignore_errors=True)
     temp_root.mkdir(parents=True, exist_ok=True)
-
     progress("Extracting Android runtime tools...")
 
     try:
@@ -138,7 +133,6 @@ def _install_command_line_tools(progress: Progress) -> None:
     CMDLINE_DIR.parent.mkdir(parents=True, exist_ok=True)
     shutil.rmtree(CMDLINE_DIR, ignore_errors=True)
     shutil.move(str(extracted), str(CMDLINE_DIR))
-
     shutil.rmtree(temp_root, ignore_errors=True)
     archive.unlink(missing_ok=True)
 
@@ -147,14 +141,14 @@ def _sdk_environment() -> dict[str, str]:
     env = os.environ.copy()
     env["ANDROID_HOME"] = str(SDK_DIR)
     env["ANDROID_SDK_ROOT"] = str(SDK_DIR)
-
-    path_parts = [
-        str(CMDLINE_DIR / "bin"),
-        str(SDK_DIR / "platform-tools"),
-        str(SDK_DIR / "emulator"),
-    ]
-
-    env["PATH"] = os.pathsep.join(path_parts + [env.get("PATH", "")])
+    env["PATH"] = os.pathsep.join(
+        [
+            str(CMDLINE_DIR / "bin"),
+            str(SDK_DIR / "platform-tools"),
+            str(SDK_DIR / "emulator"),
+            env.get("PATH", ""),
+        ]
+    )
     return env
 
 
@@ -167,12 +161,8 @@ def _ensure_java(progress: Progress) -> Path:
     if java:
         return Path(java).resolve().parent.parent
 
-    # Android command-line tools require a Java runtime. Use the official
-    # Eclipse Adoptium API to obtain a local JDK without requiring a manual
-    # Java installation.
     java_dir = RUNTIME_DIR / "jdk-17"
     java_exe = java_dir / "bin" / "java.exe"
-
     if java_exe.is_file():
         return java_dir
 
@@ -186,7 +176,6 @@ def _ensure_java(progress: Progress) -> Path:
     extract_root = RUNTIME_DIR / "jdk17-extract"
     shutil.rmtree(extract_root, ignore_errors=True)
     extract_root.mkdir(parents=True, exist_ok=True)
-
     progress("Installing Java for Android tools...")
 
     try:
@@ -197,61 +186,80 @@ def _ensure_java(progress: Progress) -> Path:
 
     candidates = list(extract_root.glob("*/bin/java.exe"))
     if not candidates:
-        raise RuntimeErrorBase(
-            "Java was downloaded, but java.exe was not found."
-        )
+        raise RuntimeErrorBase("Java was downloaded, but java.exe was not found.")
 
     shutil.rmtree(java_dir, ignore_errors=True)
     shutil.move(str(candidates[0].parent.parent), str(java_dir))
-
     shutil.rmtree(extract_root, ignore_errors=True)
     archive.unlink(missing_ok=True)
 
     if not java_exe.is_file():
         raise RuntimeErrorBase("Java installation did not complete.")
-
     return java_dir
+
+
+def _tool_env(java_home: Path) -> dict[str, str]:
+    env = _sdk_environment()
+    env["JAVA_HOME"] = str(java_home)
+    env["CLASSPATH"] = ""
+    return env
 
 
 def _accept_licenses(env: dict[str, str], progress: Progress) -> None:
     progress("Checking Android SDK licenses...")
 
+    # sdkmanager is interactive on Windows. Send more responses than the
+    # current package set can require and keep the full output for diagnostics.
     result = _run(
         [str(SDKMANAGER), "--licenses"],
-        timeout=120,
+        timeout=180,
         env=env,
-        input_text=("y\n" * 30),
+        input_text=("y\n" * 100),
     )
 
+    output = "\n".join(
+        part.strip() for part in (result.stdout, result.stderr) if part.strip()
+    )
     if result.returncode != 0:
         raise RuntimeErrorBase(
-            result.stderr.strip()
-            or "Android SDK license setup failed."
+            "Android SDK license setup failed.\n\n"
+            + (output or "sdkmanager returned a non-zero exit code.")
+        )
+
+    # Some sdkmanager builds can finish with code 0 while still reporting that
+    # a license remains unaccepted. Treat that as a setup failure instead of
+    # allowing the package install to fail later with a less useful message.
+    if "not accepted" in output.lower():
+        raise RuntimeErrorBase(
+            "Android SDK license setup failed.\n\n" + output
         )
 
 
-def _install_sdk_packages(env: dict[str, str], progress: Progress) -> None:
+def _install_sdk_packages(
+    env: dict[str, str], progress: Progress
+) -> None:
     progress("Installing Android emulator components...")
 
     result = _run(
         [str(SDKMANAGER), *SDK_PACKAGES],
         timeout=1800,
         env=env,
-        input_text=("y\n" * 30),
+        input_text=("y\n" * 100),
     )
 
+    output = "\n".join(
+        part.strip() for part in (result.stdout, result.stderr) if part.strip()
+    )
     if result.returncode != 0:
         raise RuntimeErrorBase(
-            result.stderr.strip()
-            or result.stdout.strip()
-            or "Android SDK component installation failed."
+            "Android SDK component installation failed.\n\n"
+            + (output or "sdkmanager returned a non-zero exit code.")
         )
 
 
 def _create_avd(env: dict[str, str], progress: Progress) -> None:
     avd_home = RUNTIME_DIR / "avd"
     avd_home.mkdir(parents=True, exist_ok=True)
-
     env["ANDROID_AVD_HOME"] = str(avd_home)
 
     existing = _run(
@@ -259,12 +267,10 @@ def _create_avd(env: dict[str, str], progress: Progress) -> None:
         timeout=60,
         env=env,
     )
-
     if f"Name: {AVD_NAME}" in existing.stdout:
         return
 
     progress("Creating the Blemm Android device...")
-
     result = _run(
         [
             str(AVDMANAGER),
@@ -283,11 +289,13 @@ def _create_avd(env: dict[str, str], progress: Progress) -> None:
         input_text="no\n",
     )
 
+    output = "\n".join(
+        part.strip() for part in (result.stdout, result.stderr) if part.strip()
+    )
     if result.returncode != 0:
         raise RuntimeErrorBase(
-            result.stderr.strip()
-            or result.stdout.strip()
-            or "Could not create the Android virtual device."
+            "Could not create the Android virtual device.\n\n"
+            + (output or "avdmanager returned a non-zero exit code.")
         )
 
 
@@ -300,12 +308,9 @@ def prepare(progress: Progress | None = None) -> None:
         )
 
     progress("Preparing Android runtime...")
-
     _install_command_line_tools(progress)
     java_home = _ensure_java(progress)
-
-    env = _sdk_environment()
-    env["JAVA_HOME"] = str(java_home)
+    env = _tool_env(java_home)
 
     _accept_licenses(env, progress)
     _install_sdk_packages(env, progress)
@@ -331,13 +336,11 @@ def start(progress: Progress | None = None) -> subprocess.Popen[str]:
 
     avd_home = RUNTIME_DIR / "avd"
     avd_home.mkdir(parents=True, exist_ok=True)
-
     env = _sdk_environment()
     env["ANDROID_AVD_HOME"] = str(avd_home)
 
     progress("Starting Android...")
-
-    process = subprocess.Popen(
+    return subprocess.Popen(
         [
             str(EMULATOR),
             "-avd",
@@ -354,8 +357,6 @@ def start(progress: Progress | None = None) -> subprocess.Popen[str]:
         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
     )
 
-    return process
-
 
 def wait_for_boot(
     adb_runner: Callable[..., subprocess.CompletedProcess[str]],
@@ -364,30 +365,21 @@ def wait_for_boot(
 ) -> str:
     progress = progress or (lambda _message: None)
     deadline = time.monotonic() + timeout
-
     progress("Waiting for Android to finish booting...")
 
     while time.monotonic() < deadline:
         result = adb_runner("devices", timeout=15)
-
         for line in result.stdout.splitlines()[1:]:
             parts = line.split()
             if len(parts) >= 2 and parts[1] == "device":
                 device = parts[0]
-
                 boot = adb_runner(
-                    "-s",
-                    device,
-                    "shell",
-                    "getprop",
-                    "sys.boot_completed",
+                    "-s", device, "shell", "getprop", "sys.boot_completed",
                     timeout=15,
                 )
-
                 if boot.returncode == 0 and boot.stdout.strip() == "1":
                     progress(f"Android is ready: {device}")
                     return device
-
         time.sleep(2)
 
     raise RuntimeErrorBase(
