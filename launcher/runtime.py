@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import time
+import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -23,10 +24,10 @@ AVDMANAGER = CMDLINE_DIR / "bin" / "avdmanager.bat"
 EMULATOR = SDK_DIR / "emulator" / "emulator.exe"
 AVD_NAME = "BlemmBedrock"
 
-COMMAND_LINE_TOOLS_URL = (
-    "https://dl.google.com/android/repository/"
-    "commandlinetools-win-11076708_latest.zip"
-)
+COMMAND_LINE_TOOLS_URLS = [
+    "https://dl.google.com/android/repository/commandlinetools-win-11076708_latest.zip",
+    "https://dl.google.com/android/repository/commandlinetools-win-9477386_latest.zip",
+]
 
 SYSTEM_IMAGE = "system-images;android-35;google_apis_playstore;x86_64"
 SDK_PACKAGES = [
@@ -70,10 +71,15 @@ def _run(
 def _download(url: str, destination: Path, progress: Progress) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     partial = destination.with_suffix(destination.suffix + ".part")
+    last_error = ""
 
     try:
         progress("Downloading Android runtime tools...")
-        with urllib.request.urlopen(url, timeout=60) as response:
+        request = urllib.request.Request(
+            url,
+            headers={"User-Agent": "BlemmBedrockLauncher/0.1"},
+        )
+        with urllib.request.urlopen(request, timeout=90) as response:
             total = int(response.headers.get("Content-Length", "0"))
             downloaded = 0
             with partial.open("wb") as handle:
@@ -89,12 +95,54 @@ def _download(url: str, destination: Path, progress: Progress) -> None:
                             f"{downloaded * 100 // total}%"
                         )
         partial.replace(destination)
+        return
     except Exception as exc:
+        last_error = str(exc)
         partial.unlink(missing_ok=True)
-        raise RuntimeErrorBase(
-            "Could not download the official Android command-line tools. "
-            "Check your internet connection and try again."
-        ) from exc
+
+    # Windows includes curl.exe on supported Windows 10/11 installations.
+    # Use it as a fallback for machines where Python's TLS/certificate store
+    # cannot establish a connection to Google's download host.
+    if os.name == "nt" and shutil.which("curl.exe"):
+        progress("Retrying Android runtime download with Windows curl...")
+        result = subprocess.run(
+            [
+                "curl.exe",
+                "-L",
+                "--fail",
+                "--retry",
+                "3",
+                "--retry-delay",
+                "2",
+                "--connect-timeout",
+                "20",
+                "--max-time",
+                "600",
+                "-A",
+                "BlemmBedrockLauncher/0.1",
+                "-o",
+                str(partial),
+                url,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=660,
+            check=False,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        if result.returncode == 0 and partial.is_file() and partial.stat().st_size > 0:
+            partial.replace(destination)
+            return
+
+        curl_error = (result.stderr or result.stdout).strip()
+        if curl_error:
+            last_error = f"{last_error}; curl: {curl_error}".strip("; ")
+
+    raise RuntimeErrorBase(
+        "Could not download the official Android command-line tools. "
+        "Check your internet connection, firewall, or antivirus settings.\n\n"
+        f"Download error: {last_error or 'unknown download error'}"
+    )
 
 
 def _install_command_line_tools(progress: Progress) -> None:
@@ -103,7 +151,17 @@ def _install_command_line_tools(progress: Progress) -> None:
 
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     archive = RUNTIME_DIR / "commandlinetools-windows.zip"
-    _download(COMMAND_LINE_TOOLS_URL, archive, progress)
+
+    last_error = ""
+    for url in COMMAND_LINE_TOOLS_URLS:
+        try:
+            _download(url, archive, progress)
+            break
+        except RuntimeErrorBase as exc:
+            last_error = str(exc)
+            archive.unlink(missing_ok=True)
+    else:
+        raise RuntimeErrorBase(last_error)
 
     temp_root = RUNTIME_DIR / "cmdline-extract"
     shutil.rmtree(temp_root, ignore_errors=True)
@@ -115,7 +173,7 @@ def _install_command_line_tools(progress: Progress) -> None:
             archive_file.extractall(temp_root)
     except zipfile.BadZipFile as exc:
         raise RuntimeErrorBase(
-            "The downloaded Android command-line tools archive is invalid."
+            "The Android command-line tools download was not a valid ZIP archive."
         ) from exc
 
     extracted = temp_root / "cmdline-tools"
@@ -148,15 +206,12 @@ def _sdk_environment() -> dict[str, str]:
 
 
 def _ensure_java(progress: Progress) -> Path:
-    # A broken JAVA_HOME can prevent even a valid java.exe on PATH from
-    # starting. Only use JAVA_HOME when it actually contains java.exe.
     existing = os.environ.get("JAVA_HOME", "").strip().strip('"')
     if existing:
         existing_path = Path(existing)
         if (existing_path / "bin" / "java.exe").is_file():
             return existing_path
 
-    # Ignore an invalid inherited JAVA_HOME while locating Java on PATH.
     clean_env = os.environ.copy()
     clean_env.pop("JAVA_HOME", None)
 
