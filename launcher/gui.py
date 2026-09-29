@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 import sys
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .adb import AdbError, devices, install, launch
 from .apk import inspect_apk
 
 
@@ -40,8 +42,8 @@ class MainWindow(QMainWindow):
 
         self.status = QLabel(
             "Minecraft APK required\n\n"
-            "Blemm Bedrock does not provide Minecraft. "
-            "Import an APK you legitimately obtained."
+            "Import your own Minecraft Bedrock APK, then launch it "
+            "through a running Android emulator."
         )
         self.status.setWordWrap(True)
         self.status.setStyleSheet("font-size: 15px; padding: 20px;")
@@ -106,24 +108,61 @@ class MainWindow(QMainWindow):
             return
 
         self.apk_path = info.path
-        size_mb = info.size / (1024 * 1024)
 
         self.status.setText(
             f"APK imported successfully.\n\n"
             f"File: {info.path.name}\n"
-            f"Size: {size_mb:.1f} MB\n"
+            f"Size: {info.size / (1024 * 1024):.1f} MB\n"
             f"SHA-256: {info.sha256}\n\n"
-            "Next: connect/configure an Android runtime, then install the APK."
+            "Click Play Bedrock with an Android emulator already running."
         )
         self.play_button.setEnabled(True)
 
     def play(self) -> None:
-        QMessageBox.information(
-            self,
-            "Android runtime not configured",
-            "The APK import stage is working. The Android runtime and "
-            "legitimate Microsoft/Xbox authentication flow are the next stages.",
-        )
+        if self.apk_path is None:
+            return
+
+        self.play_button.setEnabled(False)
+        self.status.setText("Starting Android runtime connection...")
+
+        try:
+            connected = devices()
+            if not connected:
+                raise AdbError(
+                    "No Android device/emulator is connected to ADB.\n\n"
+                    "Start an Android emulator with ADB enabled, then click "
+                    "Play Bedrock again."
+                )
+
+            device = connected[0]
+            self.status.setText(
+                f"Android runtime connected: {device}\n"
+                "Installing Minecraft APK..."
+            )
+
+            install(self.apk_path, device)
+
+            self.status.setText(
+                "Minecraft APK installed. Launching Minecraft..."
+            )
+            package = launch(self.apk_path, device)
+
+            self.status.setText(
+                f"Minecraft launched successfully.\n\n"
+                f"Package: {package}\n"
+                f"Android device: {device}\n\n"
+                "Sign in through Minecraft's normal Microsoft account screen."
+            )
+
+        except (AdbError, OSError, ValueError) as exc:
+            self.status.setText("Launch failed.")
+            QMessageBox.critical(
+                self,
+                "Could not launch Minecraft",
+                str(exc),
+            )
+        finally:
+            self.play_button.setEnabled(True)
 
 
 def run() -> int:
