@@ -130,7 +130,9 @@ def package_name_from_apk(apk: Path) -> str:
             continue
         build_tools = root / "build-tools"
         if build_tools.is_dir():
-            aapt_candidates.extend(sorted(build_tools.glob("*/aapt.exe"), reverse=True))
+            aapt_candidates.extend(
+                sorted(build_tools.glob("*/aapt.exe"), reverse=True)
+            )
 
     which_aapt = shutil.which("aapt")
     if which_aapt:
@@ -164,17 +166,69 @@ def package_name_from_apk(apk: Path) -> str:
 
 def launch(apk: Path, device: str | None = None) -> str:
     package = package_name_from_apk(apk)
+    target = ["-s", device] if device else []
 
-    args = []
-    if device:
-        args.extend(["-s", device])
-    args.extend(["shell", "monkey", "-p", package, "1"])
+    # Resolve the real launcher activity. This is more reliable than monkey,
+    # which can return success even when no activity was actually started.
+    resolve = run_adb(
+        *target,
+        "shell",
+        "cmd",
+        "package",
+        "resolve-activity",
+        "--brief",
+        "-a",
+        "android.intent.action.MAIN",
+        "-c",
+        "android.intent.category.LAUNCHER",
+        package,
+        timeout=30,
+    )
 
-    result = run_adb(*args, timeout=30)
+    if resolve.returncode != 0:
+        details = (resolve.stderr or resolve.stdout).strip()
+        raise AdbError(
+            f"Could not find Minecraft's launcher activity for package {package}."
+            + (f"\n\nADB: {details}" if details else "")
+        )
+
+    activity = ""
+    for line in reversed(resolve.stdout.splitlines()):
+        line = line.strip()
+        if "/" in line and not line.startswith("priority="):
+            activity = line
+            break
+
+    if not activity:
+        raise AdbError(
+            f"Android installed {package}, but no launcher activity was found."
+        )
+
+    result = run_adb(
+        *target,
+        "shell",
+        "am",
+        "start",
+        "-W",
+        "-n",
+        activity,
+        timeout=60,
+    )
+
+    output = "\n".join(
+        part.strip() for part in (result.stdout, result.stderr) if part.strip()
+    )
+
     if result.returncode != 0:
         raise AdbError(
-            result.stderr.strip() or result.stdout.strip()
-            or f"Could not launch Android package {package}."
+            f"Android could not start Minecraft ({activity}).\n\n"
+            + (output or "adb am start returned a non-zero exit code.")
+        )
+
+    if "Error type" in output or "Exception occurred" in output:
+        raise AdbError(
+            f"Android reported an error while starting Minecraft ({activity}).\n\n"
+            + output
         )
 
     return package
