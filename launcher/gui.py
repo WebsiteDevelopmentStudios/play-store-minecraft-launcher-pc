@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 import sys
 from pathlib import Path
 
@@ -15,17 +14,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .adb import AdbError, devices, find_adb, install, launch
+from .adb import AdbError, devices, find_adb, install, launch, run_adb
 from .apk import inspect_apk
+from .runtime import RuntimeErrorBase, is_ready, prepare, start, wait_for_boot
 
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+
         self.setWindowTitle("Blemm Bedrock Launcher")
         self.resize(900, 560)
 
         self.apk_path: Path | None = None
+        self.android_process = None
 
         root = QWidget()
         layout = QVBoxLayout(root)
@@ -42,9 +44,9 @@ class MainWindow(QMainWindow):
 
         self.status = QLabel(
             "Minecraft APK required\n\n"
-            "Import your own Minecraft Bedrock APK. ADB is bundled and will "
-            "be installed automatically when needed. An Android runtime is "
-            "still required to actually run Minecraft."
+            "Import your own Minecraft Bedrock APK. "
+            "Blemm can automatically prepare its Android runtime "
+            "the first time you play."
         )
         self.status.setWordWrap(True)
         self.status.setStyleSheet("font-size: 15px; padding: 20px;")
@@ -74,6 +76,7 @@ class MainWindow(QMainWindow):
                 background: #101318;
                 color: #f3f5f7;
             }
+
             QPushButton {
                 background: #242a33;
                 border: 1px solid #39424f;
@@ -81,15 +84,21 @@ class MainWindow(QMainWindow):
                 padding: 12px 18px;
                 font-size: 15px;
             }
+
             QPushButton:hover {
                 background: #303846;
             }
+
             QPushButton:disabled {
                 color: #707985;
                 background: #191d23;
             }
             """
         )
+
+    def set_status(self, message: str) -> None:
+        self.status.setText(message)
+        QApplication.processEvents()
 
     def import_apk(self) -> None:
         filename, _ = QFileDialog.getOpenFileName(
@@ -115,7 +124,7 @@ class MainWindow(QMainWindow):
             f"File: {info.path.name}\n"
             f"Size: {info.size / (1024 * 1024):.1f} MB\n"
             f"SHA-256: {info.sha256}\n\n"
-            "ADB will be installed automatically if needed. An Android runtime is still required."
+            "Press Play Bedrock to prepare Android automatically."
         )
         self.play_button.setEnabled(True)
 
@@ -124,43 +133,54 @@ class MainWindow(QMainWindow):
             return
 
         self.play_button.setEnabled(False)
-        self.status.setText("Preparing Android tools...")
 
         try:
             adb = find_adb(auto_install=True)
             if adb is None:
-                raise AdbError("Android Platform-Tools (ADB) could not be installed.")
-\n            self.status.setText(f"ADB ready: {adb.name}\\nChecking for an Android runtime...")
-            connected = devices()
-            if not connected:
                 raise AdbError(
-                    "No Android runtime is connected to ADB.\\n\\n"
-                    "ADB is now handled automatically by Blemm Bedrock Launcher, "
-                    "but an Android emulator/runtime still needs to be configured."
+                    "Android Platform-Tools (ADB) could not be installed."
                 )
 
-            device = connected[0]
-            self.status.setText(
+            self.set_status("ADB is ready.")
+
+            connected = devices()
+
+            if not connected:
+                if not is_ready():
+                    self.set_status(
+                        "Android runtime not found. Setting it up automatically..."
+                    )
+                    prepare(self.set_status)
+
+                self.android_process = start(self.set_status)
+
+                # ADB may need a few seconds to notice the newly started emulator.
+                self.set_status("Connecting ADB to Android...")
+                device = wait_for_boot(run_adb, self.set_status)
+            else:
+                device = connected[0]
+
+            self.set_status(
                 f"Android runtime connected: {device}\n"
                 "Installing Minecraft APK..."
             )
 
             install(self.apk_path, device)
 
-            self.status.setText(
+            self.set_status(
                 "Minecraft APK installed. Launching Minecraft..."
             )
             package = launch(self.apk_path, device)
 
-            self.status.setText(
+            self.set_status(
                 f"Minecraft launched successfully.\n\n"
                 f"Package: {package}\n"
                 f"Android device: {device}\n\n"
                 "Sign in through Minecraft's normal Microsoft account screen."
             )
 
-        except (AdbError, OSError, ValueError) as exc:
-            self.status.setText("Launch failed.")
+        except (AdbError, RuntimeErrorBase, OSError, ValueError) as exc:
+            self.set_status("Launch failed.")
             QMessageBox.critical(
                 self,
                 "Could not launch Minecraft",
@@ -175,3 +195,7 @@ def run() -> int:
     window = MainWindow()
     window.show()
     return app.exec()
+
+
+if __name__ == "__main__":
+    raise SystemExit(run())
