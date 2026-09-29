@@ -3,14 +3,55 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import urllib.request
+import zipfile
 from pathlib import Path
+
+from .config import RUNTIME_DIR
 
 
 class AdbError(RuntimeError):
     pass
 
 
-def find_adb() -> Path | None:
+PLATFORM_TOOLS_URL = "https://dl.google.com/android/repository/platform-tools-latest-windows.zip"
+PLATFORM_TOOLS_DIR = RUNTIME_DIR / "platform-tools"
+BUNDLED_ADB = PLATFORM_TOOLS_DIR / "adb.exe"
+
+
+def _download_platform_tools() -> Path:
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    archive = RUNTIME_DIR / "platform-tools-windows.zip"
+    temp_archive = RUNTIME_DIR / "platform-tools-windows.zip.part"
+
+    try:
+        with urllib.request.urlopen(PLATFORM_TOOLS_URL, timeout=30) as response:
+            with temp_archive.open("wb") as handle:
+                shutil.copyfileobj(response, handle)
+
+        with zipfile.ZipFile(temp_archive) as archive_file:
+            archive_file.extractall(RUNTIME_DIR)
+
+        temp_archive.unlink(missing_ok=True)
+    except Exception as exc:
+        temp_archive.unlink(missing_ok=True)
+        raise AdbError(
+            "Could not download Android Platform-Tools (ADB). "
+            "Check your internet connection and try again."
+        ) from exc
+
+    if not BUNDLED_ADB.is_file():
+        raise AdbError(
+            "Platform-Tools downloaded, but adb.exe was not found after extraction."
+        )
+
+    return BUNDLED_ADB
+
+
+def find_adb(auto_install: bool = True) -> Path | None:
+    if BUNDLED_ADB.is_file():
+        return BUNDLED_ADB
+
     candidates = [
         shutil.which("adb"),
         Path.home() / "AppData/Local/Android/Sdk/platform-tools/adb.exe",
@@ -25,16 +66,16 @@ def find_adb() -> Path | None:
         if path.exists() and path.is_file():
             return path
 
+    if auto_install and os.name == "nt":
+        return _download_platform_tools()
+
     return None
 
 
 def run_adb(*args: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
     adb = find_adb()
     if adb is None:
-        raise AdbError(
-            "ADB was not found. Install Android SDK Platform-Tools and make sure "
-            "an Android emulator/device with USB debugging is running."
-        )
+        raise AdbError("ADB could not be found or installed.")
 
     return subprocess.run(
         [str(adb), *args],
@@ -77,7 +118,6 @@ def install(apk: Path, device: str | None = None) -> None:
 
 
 def package_name_from_apk(apk: Path) -> str:
-    """Read the package name with Android SDK's aapt executable."""
     sdk_roots = [
         Path(os.environ.get("ANDROID_HOME", "")),
         Path(os.environ.get("ANDROID_SDK_ROOT", "")),
@@ -117,8 +157,8 @@ def package_name_from_apk(apk: Path) -> str:
                             return line[start:end]
 
     raise AdbError(
-        "Could not determine the APK package name. Install Android SDK Build-Tools "
-        "so the launcher can inspect the APK."
+        "ADB is ready, but Android SDK Build-Tools are still needed to read "
+        "the APK package name."
     )
 
 
@@ -133,8 +173,8 @@ def launch(apk: Path, device: str | None = None) -> str:
     result = run_adb(*args, timeout=30)
     if result.returncode != 0:
         raise AdbError(
-            result.stderr.strip() or result.stdout.strip() or
-            f"Could not launch Android package {package}."
+            result.stderr.strip() or result.stdout.strip()
+            or f"Could not launch Android package {package}."
         )
 
     return package
