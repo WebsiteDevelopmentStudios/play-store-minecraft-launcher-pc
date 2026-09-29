@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .adb import AdbError, devices, install, launch
+from .adb import AdbError, devices, find_adb, install, launch
 from .apk import inspect_apk
 
 
@@ -42,8 +42,9 @@ class MainWindow(QMainWindow):
 
         self.status = QLabel(
             "Minecraft APK required\n\n"
-            "Import your own Minecraft Bedrock APK, then launch it "
-            "through a running Android emulator."
+            "Import your own Minecraft Bedrock APK. ADB is bundled and will "
+            "be installed automatically when needed. An Android runtime is "
+            "still required to actually run Minecraft."
         )
         self.status.setWordWrap(True)
         self.status.setStyleSheet("font-size: 15px; padding: 20px;")
@@ -114,7 +115,7 @@ class MainWindow(QMainWindow):
             f"File: {info.path.name}\n"
             f"Size: {info.size / (1024 * 1024):.1f} MB\n"
             f"SHA-256: {info.sha256}\n\n"
-            "Click Play Bedrock with an Android emulator already running."
+            "ADB will be installed automatically if needed. An Android runtime is still required."
         )
         self.play_button.setEnabled(True)
 
@@ -123,15 +124,19 @@ class MainWindow(QMainWindow):
             return
 
         self.play_button.setEnabled(False)
-        self.status.setText("Starting Android runtime connection...")
+        self.status.setText("Preparing Android tools...")
 
         try:
+            adb = find_adb(auto_install=True)
+            if adb is None:
+                raise AdbError("Android Platform-Tools (ADB) could not be installed.")
+\n            self.status.setText(f"ADB ready: {adb.name}\\nChecking for an Android runtime...")
             connected = devices()
             if not connected:
                 raise AdbError(
-                    "No Android device/emulator is connected to ADB.\n\n"
-                    "Start an Android emulator with ADB enabled, then click "
-                    "Play Bedrock again."
+                    "No Android runtime is connected to ADB.\\n\\n"
+                    "ADB is now handled automatically by Blemm Bedrock Launcher, "
+                    "but an Android emulator/runtime still needs to be configured."
                 )
 
             device = connected[0]
