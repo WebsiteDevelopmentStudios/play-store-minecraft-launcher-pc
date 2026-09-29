@@ -36,6 +36,7 @@ SDK_PACKAGES = [
     "platform-tools",
     "emulator",
     "platforms;android-35",
+    "build-tools;35.0.0",
     SYSTEM_IMAGE,
 ]
 
