@@ -101,6 +101,28 @@ def devices() -> list[str]:
     return found
 
 
+def optimize_android(device: str) -> None:
+    """Reduce Android UI overhead and request a high refresh rate for gaming."""
+    settings = [
+        ("global", "window_animation_scale", "0"),
+        ("global", "transition_animation_scale", "0"),
+        ("global", "animator_duration_scale", "0"),
+        ("system", "peak_refresh_rate", "120.0"),
+        ("system", "min_refresh_rate", "60.0"),
+    ]
+
+    for namespace, key, value in settings:
+        result = run_adb(
+            "-s", device, "shell", "settings", "put", namespace, key, value,
+            timeout=15,
+        )
+        if result.returncode != 0:
+            # Refresh-rate settings vary between Android images. Animation
+            # settings are also non-essential, so don't prevent Minecraft
+            # from launching if one isn't supported.
+            continue
+
+
 def install(apk: Path, device: str | None = None) -> None:
     if not apk.is_file():
         raise AdbError(f"APK not found: {apk}")
