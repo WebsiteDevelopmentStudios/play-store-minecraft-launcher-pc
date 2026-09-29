@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .adb import AdbError, devices, find_adb, install, launch, run_adb
+from .adb import AdbError, devices, find_adb, install, launch, optimize_android, run_adb
 from .apk import inspect_apk
 from .runtime import RuntimeErrorBase, is_ready, prepare, start, wait_for_boot
 
@@ -162,9 +162,14 @@ class MainWindow(QMainWindow):
 
             self.set_status(
                 f"Android runtime connected: {device}\n"
+                "Optimizing Android for gaming..."
+            )
+            optimize_android(device)
+
+            self.set_status(
+                "Android gaming mode enabled.\n"
                 "Installing Minecraft APK..."
             )
-
             install(self.apk_path, device)
 
             self.set_status(
