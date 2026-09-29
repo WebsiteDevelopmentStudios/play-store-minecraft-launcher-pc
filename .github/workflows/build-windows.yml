@@ -1,0 +1,52 @@
+name: Build Windows Launcher
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build launcher
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --windowed --name "BlemmBedrockLauncher" --collect-all PySide6 main.py
+
+      - name: Verify executable
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist/BlemmBedrockLauncher.exe")) {
+            throw "Build failed: dist/BlemmBedrockLauncher.exe was not created."
+          }
+          Get-Item "dist/BlemmBedrockLauncher.exe" | Format-List Name,Length,FullName
+
+      - name: Upload Windows executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: BlemmBedrockLauncher-Windows
+          path: dist/BlemmBedrockLauncher.exe
+          if-no-files-found: error
+          retention-days: 30
