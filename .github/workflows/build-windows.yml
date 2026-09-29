@@ -33,7 +33,7 @@ jobs:
       - name: Build launcher
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --windowed --name "BlemmBedrockLauncher" --collect-all PySide6 main.py
+          pyinstaller --noconfirm --clean --onefile --windowed --name "BlemmBedrockLauncher" --collect-all PySide6 main.py
 
       - name: Verify executable
         shell: pwsh
